@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="header.png" alt="Abraxas Labs — gitea-restore-file-open" width="100%">
+  <img src="header.png" alt="Abraxas Labs - gitea-restore-file-open" width="100%">
 </p>
 
 <p align="center">
@@ -14,149 +14,65 @@
 
 # gitea-restore-file-open
 
-**Gitea** `1.27.3` — Gitea
+**Gitea** `1.27.3` - Gitea
 
-Unpublished Gitea source finding: restore-repo file:// os.Open LFI (dump symlink).
+[CVE-2026-59765](https://github.com/go-gitea/gitea/security/advisories/GHSA-2wm4-vwp6-v7xc) put a hostmatcher HTTP client on [`OpenWithClient`](https://github.com/go-gitea/gitea/blob/v1.27.3/modules/uri/uri.go). The `file://` branch ignores that client and calls `os.Open`. Restore of a dump has no `DownloadFunc`. [`gitea_uploader.go`](https://github.com/go-gitea/gitea/blob/v1.27.3/services/migrations/gitea_uploader.go) then opens the rewritten `file://` URL. `os.Open` follows a **dump-side symlink**. Join stays under the dump. The symlink does not.
+
+**Operator restore of an untrusted dump copies the symlink target into a release attachment. As the Gitea uid, that is any file the service account can read.**
 
 | | |
 |---|---|
-| ID | Unpublished Gitea source finding #9 (no CVE yet) |
+| ID | no CVE yet |
 | CWE | [CWE-73](https://cwe.mitre.org/data/definitions/73.html) |
 | CVSS | **Medium: 4.2** `CVSS:3.1/AV:L/AC:L/PR:H/UI:R/S:U/C:H/I:N/A:N` |
 | Product | [Gitea](https://github.com/go-gitea/gitea) |
-| Affected | all versions **through 1.27.3** (inclusive) |
-| Patched | vendor patch — see references |
-| Auth | authenticated (see source map) |
+| Affected | through **v1.27.3** (`146cc3e`); local operator `gitea restore-repo` |
+| Auth | local operator restore of an untrusted dump |
 | License | [GNU Affero GPL v3.0](LICENSE) |
-| Lab | `127.0.0.1` only · vendor/client disclosure pack, not a scanner |
+| Lab | `127.0.0.1` only |
 
----
+## What an attacker can do
 
-## Advisory (from the source map)
+Hand an admin an untrusted dump (a "backup" directory, a restore from an untrusted remote) that contains a **symlink** under the joined-under-dump path. Restore copies the **target file** into a release attachment on the restored repo. Whoever can read that repo downloads it.
 
-modules/uri/uri.go OpenWithClient case file: os.Open. CVE-2026-59765 put a hostmatcher HTTP client on this helper; the file:// branch ignores that client. Finding 8 FilePathJoinAbs dump-root escape FAIL on 1.27.3.
+If the dump author names `app.ini`, that is credential theft (`INTERNAL_TOKEN`, `SECRET_KEY`, JWT, DB password). Lab oracle was a planted witness file, not `app.ini`. It is not OS LPE. It is not unauthenticated. It is not dump-root join escape. Live migrate from GitHub/GitLab/Gitea sets `DownloadFunc` and does **not** `os.Open` an attacker `file://`.
 
----
+## How I found it
 
-## Entry
+Two restore maps sat on the leftover table. I labbed the obvious one first.
 
-- **Method:** `CLI`
-- **Path:** `gitea restore-repo`
-- **Router:** Operator restore-repo. DownloadFunc is nil so uploader calls uri.OpenWithClient file:// → os.Open. os.Open follows dump symlink. FilePathJoinAbs stays under dump on 1.27.3.
-- **Notes:** Local operator unpublished Gitea #9 CWE-73 v1.27.3. Witness: restored release attachment bytes GITEA-FILE-OPEN-WITNESS. Not dump-root join escape. Not live-migrate file:// LFI. Not eval. Not a reverse shell.
+Finding 8 was dump-root join escape: put an absolute `DownloadURL` in `release.yml`, hope [`FilePathJoinAbs`](https://github.com/go-gitea/gitea/blob/v1.27.3/modules/util/path.go) drops the dump prefix the way naive `filepath.Join(base, "/etc/passwd")` does. On 1.27.3 it does not. Each `sub` is `filepath.Clean("/"+s)` then `filepath.Join(base, cleaned)`. Replica join of `/tmp/dump` + `/tmp/GITEA-JOIN-OUTSIDE` stayed `/tmp/dump/tmp/GITEA-JOIN-OUTSIDE`. Restore rewrote `file://` under the dump and failed `open ...: no such file or directory`. That is not join-escape on this tag.
 
-### Call chain
+Finding 9 is what landed. I planted a witness file outside the dump, put a symlink at the joined-under-dump path, ran `gitea restore-repo`. Restore rc=0. The restored release attachment contained `GITEA-FILE-OPEN-WITNESS`.
 
-- `gitea restore-repo --repo_dir /data/restore-dump`
-- `release DownloadURL rewritten to file://&lt;dump&gt;/tmp/GITEA-FILE-WITNESS.txt`
-- `OpenWithClient file:// → os.Open follows dump symlink`
-- `GET /labadmin/restored/releases/download/v1.0/witness.txt`
+Wrong turns already recorded: dump-root join escape via an absolute `DownloadURL`; live migrate `file://` LFI; `X-Gitea-Internal-Auth` (restore is CLI as the Gitea uid, not `/api/internal`); treating restore HTTP as remote unauth (CVSS is local, high privilege, user interaction); a reverse shell. Theatre.
 
-### Lab preconditions
-
-- Gitea 1.27.3
-- Operator runs gitea restore-repo on an untrusted dump
-- Dump contains a symlink at the joined-under-dump path
-
-### Witness
-
-restored release attachment body is GITEA-FILE-OPEN-WITNESS
-
-### Not success
-
-- eval/base64/system payload
-- reverse shell
-- dump-root join escape via absolute DownloadURL
-- live migrate file:// LFI
-- X-Gitea-Internal-Auth
-
----
-
-## Patch / remediation
-
-**Do this first:** Apply the vendor patch for **Gitea**. See references.
-
-**Verify after upgrade**
-
-- Re-run `gitea-restore-file-open-Abraxas-Labs.py` against the patched build: the mapped witness must **not** appear.
-- Confirm the vendor advisory / changeset in the deployed tree (see references).
-- A WAF signature is delay, not a patch.
-
-**If you cannot update immediately**
-
-- Disable or isolate the affected component.
-- Hunt for the witness condition on production (new privileged users, unexpected files, injected rows — whatever this CVE's map names).
-
----
-
-## Reproduction (authorized lab)
-
-Target **only** `http://127.0.0.1:8088` (or the loopback you bound). Do not point this script at the internet.
-
-```bash
-python3 gitea-restore-file-open-Abraxas-Labs.py
-```
-
-Success is the **witness** above in the response body. Generic 200 HTML is not it.
-
----
-
-## Lab images
-
-Loopback stack used to reproduce. Official images unless a `Dockerfile` in this folder builds from source.
-
-- [`lab/docker-compose.yml`](lab/docker-compose.yml)
-- [`lab/Dockerfile`](lab/Dockerfile)
-- [`lab/run.sh`](lab/run.sh)
+## Lab
 
 ```bash
 cd lab
-docker compose up --force-recreate
+./run.sh
 ```
 
-Bind the vulnerable product tree next to Compose if the YAML mounts a local directory (plugin zip / source tag from the version table). Publish nothing except `127.0.0.1`.
+Target **only** `http://127.0.0.1:18137`. Compose mounts `lab/dump` read-only. `run.sh` plants the witness inside the container, builds the dump, puts the symlink, then `gitea restore-repo`.
 
----
+```text
+restore-rc=0 Restore repo labadmin/restored successfully
+download status=200 snippet=GITEA-FILE-OPEN-WITNESS
+SUCCESS GITEA-RESTORE-FILE-OPEN
+```
+
+## The fix
+
+Drop `file://` from `OpenWithClient`, or refuse to follow dump symlinks, and do not restore untrusted dumps. Restored attachment must not contain the out-of-dump witness.
 
 ## References
 
-- [github.com/go-gitea/gitea](https://github.com/go-gitea/gitea) tag v1.27.3
-
-- Abraxas Labs: [abraxaslabs.tech](https://abraxaslabs.tech) · [github.com/abraxas](https://github.com/abraxas) · [@abraxas_null](https://x.com/abraxas_null)
-
----
-
-## Records (structured)
-
-```
-# Gitea unpublished #9 — restore file:// os.Open
-
-CWE: CWE-73
-Severity: Medium (source review)
-
-## Description
-
-`OpenWithClient` still implements `file://` with `os.Open`. Operator restore of an untrusted dump rewrites release `DownloadURL` to `file://` under the dump. `os.Open` follows a dump symlink. FilePathJoinAbs does not leave the dump root on 1.27.3.
-
-## Product
-
-Gitea 1.27.3. Lab oracle is GITEA-FILE-OPEN-WITNESS in the restored attachment, not a shell.
-```
-
----
+- [github.com/go-gitea/gitea](https://github.com/go-gitea/gitea) tag [v1.27.3](https://github.com/go-gitea/gitea/releases/tag/v1.27.3)
+- [`uri.go`](https://github.com/go-gitea/gitea/blob/v1.27.3/modules/uri/uri.go) · [`gitea_uploader.go`](https://github.com/go-gitea/gitea/blob/v1.27.3/services/migrations/gitea_uploader.go) · [`FilePathJoinAbs`](https://github.com/go-gitea/gitea/blob/v1.27.3/modules/util/path.go)
+- Nearby patched: [CVE-2026-59765](https://github.com/go-gitea/gitea/security/advisories/GHSA-2wm4-vwp6-v7xc)
+- [CWE-73](https://cwe.mitre.org/data/definitions/73.html)
 
 ## License
 
-This disclosure pack is licensed under the **GNU Affero General Public License v3.0**. See [LICENSE](LICENSE).
-
----
-
-## Disclaimer
-
-This pack is for **the vendor, the site owner, and licensed labs**. The script talks to `127.0.0.1`. Using it against systems you do not own is not authorized by Abraxas Labs. No warranty.
-
-<p align="center">
-  <a href="https://abraxaslabs.tech">abraxaslabs.tech</a> ·
-  <a href="https://github.com/abraxas">github.com/abraxas</a> ·
-  <a href="https://x.com/abraxas_null">@abraxas_null</a>
-</p>
+GNU Affero GPL v3.0. See [LICENSE](LICENSE). Loopback lab only. No warranty.
