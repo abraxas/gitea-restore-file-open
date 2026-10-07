@@ -222,115 +222,27 @@ def _cprint(*args, **kwargs):
 print_abraxas_banner()
 _builtins.print = _cprint
 
-from __future__ import annotations
-
-import base64
-import json
-import ssl
+import stat
 import subprocess
 import sys
-import urllib.error
-import urllib.request
+from pathlib import Path
 
-BASE = (sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:18137").rstrip("/")
-USER = ("labadmin", "LabPass123!")
-WITNESS = "GITEA-FILE-OPEN-WITNESS"
-OWNER = "labadmin"
-REPO = "restored"
-CTX = ssl._create_unverified_context()
+HERE = Path(__file__).resolve().parent
+LAB = HERE / "lab"
+RUN = LAB / "run.sh"
+LABEL = "GITEA-RESTORE-FILE-OPEN"
 
 
-def fail(msg: str) -> None:
-    print("FAIL " + msg, flush=True)
-    raise SystemExit(1)
-
-
-def req(method: str, path: str, data: dict | None = None, url: str | None = None) -> tuple[int, bytes]:
-    tok = base64.b64encode(f"{USER[0]}:{USER[1]}".encode()).decode()
-    hdrs = {
-        "User-Agent": "gitea-restore-file-open-lab",
-        "Authorization": "Basic " + tok,
-    }
-    body = None
-    if data is not None:
-        hdrs["Content-Type"] = "application/json"
-        body = json.dumps(data).encode()
-    target = url if url is not None else BASE + path
-    r = urllib.request.Request(target, data=body, headers=hdrs, method=method)
-    try:
-        with urllib.request.urlopen(r, timeout=60, context=CTX) as resp:
-            return resp.status, resp.read()
-    except urllib.error.HTTPError as exc:
-        return exc.code, exc.read()
-
-
-def docker_exec(*args: str) -> str:
-    cmd = ["docker", "compose", "exec", "-T", "gitea", *args]
-    p = subprocess.run(cmd, capture_output=True, text=True)
-    return (p.stdout or "") + (p.stderr or "")
-
-
-def main() -> None:
-    print(f"IOC base={BASE}", flush=True)
-    s, b = req("GET", "/api/v1/version")
-    print(f"IOC version status={s} snippet={b[:80]!r}", flush=True)
-    if s != 200:
-        fail("gitea version")
-
-    s, b = req("GET", f"/api/v1/repos/{OWNER}/{REPO}/releases")
-    text = b.decode("utf-8", "replace")
-    print(f"IOC releases status={s} snippet={text[:280]!r}", flush=True)
-    if s != 200:
-        fail("list releases")
-    try:
-        releases = json.loads(text)
-    except json.JSONDecodeError:
-        fail("releases json")
-    if not isinstance(releases, list) or not releases:
-        fail("no restored releases")
-
-    assets = []
-    for rel in releases:
-        assets.extend(rel.get("assets") or [])
-    if not assets:
-        fail("no restored release assets")
-
-    asset = assets[0]
-    dl = asset.get("browser_download_url") or ""
-    uuid = asset.get("uuid") or ""
-    print(f"IOC asset name={asset.get('name')!r} size={asset.get('size')} uuid={uuid} url={dl}", flush=True)
-
-    body = b""
-    src = ""
-    if dl:
-        s, body = req("GET", "", url=dl)
-        print(f"IOC download status={s} bytes={len(body)} snippet={body[:80]!r}", flush=True)
-        if s == 200 and body:
-            src = "api"
-
-    if WITNESS not in body.decode("utf-8", "replace"):
-        disk = docker_exec("sh", "-c", "find /data/gitea/attachments -type f 2>/dev/null | head -20")
-        print(f"IOC disk-attachments {disk.strip()[:400]!r}", flush=True)
-        paths = [ln.strip() for ln in disk.splitlines() if ln.strip().startswith("/data/")]
-        for pth in paths:
-            raw = docker_exec("cat", pth)
-            print(f"IOC disk-cat path={pth} snippet={raw[:80]!r}", flush=True)
-            if WITNESS in raw:
-                body = raw.encode()
-                src = "disk"
-                break
-
-    snippet = body.decode("utf-8", "replace")[:80]
-    if WITNESS not in snippet and WITNESS not in body.decode("utf-8", "replace"):
-        fail("attachment empty/missing witness")
-    print(f"IOC attachment-src={src} snippet={snippet!r}", flush=True)
-    print("SUCCESS GITEA-RESTORE-FILE-OPEN", flush=True)
-    print("oracle: restore-repo release asset OpenWithClient file:// os.Open; attachment bytes == GITEA-FILE-OPEN-WITNESS", flush=True)
-    print("product: Gitea 1.27.3", flush=True)
-    print("sink: modules/uri/uri.go OpenWithClient case file -> os.Open", flush=True)
-    print("lab: http://127.0.0.1:18137", flush=True)
+def main() -> int:
+    if not RUN.is_file():
+        print(f"FAIL {LABEL} lab/run.sh missing")
+        return 1
+    mode = RUN.stat().st_mode
+    if not mode & stat.S_IXUSR:
+        RUN.chmod(mode | stat.S_IXUSR)
+    return int(subprocess.call(["/bin/bash", str(RUN), *sys.argv[1:]], cwd=LAB))
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
 
