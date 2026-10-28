@@ -13,6 +13,10 @@
   &nbsp;·&nbsp;
   <a href="https://github.com/abraxas/gitea-restore-file-open">gitea-restore-file-open</a>
 </p>
+<p align="center">
+  Write-up: <a href="https://abraxaslabs.tech/research/gitea-restore-file-open"><strong>https://abraxaslabs.tech/research/gitea-restore-file-open</strong></a>
+</p>
+
 
 # gitea-restore-file-open
 
